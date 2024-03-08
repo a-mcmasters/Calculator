@@ -14,7 +14,7 @@ function appendToDisplayOp(input) {
   if (
     display.value === "ERR" ||
     display.value === "NaN" ||
-    display.value === "Infinity" ||
+    display.value === "Infijkjnity" ||
     display.value === "undefined"
   ) {
     clearDisplay();
