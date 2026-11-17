@@ -442,9 +442,11 @@ function exportCsv() {
       Math.round(activeMs(e) / 60000), Math.round((e.pausedMs || 0) / 60000)]);
   }
   const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+  const filename = `${p.name.replace(/\W+/g, "-").toLowerCase()}-${toDateInput(Date.now())}.csv`;
+  if (window.AndroidBridge) return window.AndroidBridge.saveFile(filename, csv); // Android app
   const a = document.createElement("a");
   a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
-  a.download = `${p.name.replace(/\W+/g, "-").toLowerCase()}-${toDateInput(Date.now())}.csv`;
+  a.download = filename;
   a.click();
   URL.revokeObjectURL(a.href);
 }
@@ -541,6 +543,14 @@ window.addEventListener("storage", (ev) => {
 
 // Refresh statistics every 30 s while the timer runs.
 setInterval(() => { if (state.running && activeTab === "stats") renderStats(); }, 30000);
+
+// Android back button: close dialogs/menus, then return to the Timer tab. Returns true if handled.
+function handleBack() {
+  if ($("modal").open) { closeModal(); return true; }
+  if (!$("project-menu").classList.contains("hidden")) { $("project-menu").classList.add("hidden"); return true; }
+  if (activeTab !== "timer") { switchTab("timer"); return true; }
+  return false;
+}
 
 save(); // persist the default project/tags on first visit so their ids stay stable
 render();
