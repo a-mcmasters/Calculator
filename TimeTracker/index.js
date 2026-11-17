@@ -1,409 +1,546 @@
-// Time Tracker — all data is stored in the browser's localStorage.
+// Time Tracker — projects, tags, a pausable timer, history and statistics.
+// Everything is stored in this browser's localStorage.
 
-const STORAGE_KEY = "timetracker.entries";
-const RUNNING_KEY = "timetracker.running";
+const STORE_KEY = "timetracker.v2";
 const DAY_MS = 86400000;
-const PALETTE = ["#00dbff", "#20d888", "#ff6bff", "#ff6500", "#9b98ff", "#fef21c", "#ff93db", "#39edf7"];
+const COLORS = ["#e53935", "#ff7a1a", "#ffd60a", "#2bd52b", "#1ec8a0", "#1ea7ff", "#5b6cff", "#a35bff", "#ff5bd1", "#ff5577", "#9e9e9e"];
 
-// ---------- storage ----------
-function load(key, fallback) {
-  try {
-    const raw = localStorage.getItem(key);
-    return raw ? JSON.parse(raw) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-function save(key, value) {
-  try {
-    if (value === null) localStorage.removeItem(key);
-    else localStorage.setItem(key, JSON.stringify(value));
-  } catch {
-    /* storage unavailable — keep working in memory */
-  }
+const DEFAULT_TAGS = [
+  ["Anime", "#ff5577"], ["Audiobook", "#ff7a1a"], ["Book", "#ffd60a"], ["Listening", "#1ea7ff"],
+  ["Manga", "#a35bff"], ["Mining", "#e53935"], ["OCR Mining", "#ff5bd1"], ["Reading", "#2bd52b"],
+  ["Watching", "#5b6cff"], ["YouTube", "#e53935"],
+];
+
+// ---------- state ----------
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+function freshState() {
+  const projectId = uid();
+  return {
+    projects: [{ id: projectId, name: "Learning Japanese", color: "#e53935" }],
+    tags: DEFAULT_TAGS.map(([name, color]) => ({ id: uid(), projectId, name, color })),
+    entries: [], // {id, projectId, title, tagIds, start, end, pausedMs}
+    running: null, // {projectId, title, tagIds, start, pausedMs, pausedAt}
+    currentProjectId: projectId,
+    draftTagIds: [],
+  };
 }
 
-let entries = load(STORAGE_KEY, []); // [{id, task, category, start, end}] (ms timestamps)
-let running = load(RUNNING_KEY, null); // {task, category, start}
-let tickHandle = null;
+function loadState() {
+  try {
+    const s = JSON.parse(localStorage.getItem(STORE_KEY));
+    if (s && Array.isArray(s.projects) && s.projects.length) return s;
+  } catch { /* fall through */ }
+  return freshState();
+}
+
+let state = loadState();
+function save() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch { /* storage unavailable */ }
+}
+
+let activeTab = "timer";
 let visibleDays = 14;
-
-const persist = () => save(STORAGE_KEY, entries);
 
 // ---------- helpers ----------
 const $ = (id) => document.getElementById(id);
 const pad = (n) => String(n).padStart(2, "0");
-const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-function startOfDay(t) {
-  const d = new Date(t);
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
+const project = () => state.projects.find((p) => p.id === state.currentProjectId) || state.projects[0];
+const projectTags = (pid = state.currentProjectId) => state.tags.filter((t) => t.projectId === pid);
+const tagById = (id) => state.tags.find((t) => t.id === id);
+const projectEntries = (pid = state.currentProjectId) => state.entries.filter((e) => e.projectId === pid);
+
+function startOfDay(t) { const d = new Date(t); d.setHours(0, 0, 0, 0); return d.getTime(); }
+function addDays(t, n) { const d = new Date(t); d.setDate(d.getDate() + n); return d.getTime(); }
+
+// Active (non-paused) duration of an entry.
+const activeMs = (e) => Math.max(0, e.end - e.start - (e.pausedMs || 0));
+
+function runningElapsed(r = state.running) {
+  if (!r) return 0;
+  const now = r.pausedAt || Date.now();
+  return Math.max(0, now - r.start - r.pausedMs);
 }
-function addDays(t, n) {
-  const d = new Date(t);
-  d.setDate(d.getDate() + n);
-  return d.getTime();
-}
-function startOfWeek(t) {
-  // Monday as the first day of the week
-  const d = new Date(startOfDay(t));
-  const day = (d.getDay() + 6) % 7;
-  return addDays(d.getTime(), -day);
+
+// "1 h 46 min", "40 min 4 sec", "17 sec"
+function fmtDur(ms) {
+  const s = Math.floor(ms / 1000);
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  if (h) return `${h} h ${m} min`;
+  if (m) return `${m} min ${sec} sec`;
+  return `${sec} sec`;
 }
 function fmtClock(ms) {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  return `${pad(Math.floor(s / 3600))}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
+  const s = Math.floor(ms / 1000);
+  return `${Math.floor(s / 3600)}:${pad(Math.floor((s % 3600) / 60))}:${pad(s % 60)}`;
 }
-function fmtShort(ms) {
-  const m = Math.round(ms / 60000);
-  return `${Math.floor(m / 60)}h ${m % 60}m`;
-}
-function fmtHM(t) {
-  const d = new Date(t);
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-function toDateInput(t) {
-  const d = new Date(t);
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-}
+const fmtHM = (t) => { const d = new Date(t); return `${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+const fmtDate = (t) => new Date(t).toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+const fmtShortDate = (t) => new Date(t).toLocaleDateString("en-US", { month: "short", day: "numeric" });
+const toDateInput = (t) => { const d = new Date(t); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; };
 function fromInputs(date, time) {
   const [y, mo, d] = date.split("-").map(Number);
   const [h, mi] = time.split(":").map(Number);
   return new Date(y, mo - 1, d, h, mi).getTime();
 }
-function escapeHtml(s) {
-  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
-function colorFor(category) {
-  if (!category) return "#8b91a1";
-  let h = 0;
-  for (const ch of category) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return PALETTE[h % PALETTE.length];
-}
 
-// All entries plus the running session (as a virtual entry ending now).
-function allSpans() {
-  const list = entries.slice();
-  if (running) list.push({ ...running, end: Date.now(), id: "__running" });
-  return list;
-}
-
-// Time of a span that falls within [from, to), splitting across midnight correctly.
-function overlap(e, from, to) {
-  return Math.max(0, Math.min(e.end, to) - Math.max(e.start, from));
-}
-function totalBetween(from, to, spans = allSpans()) {
-  return spans.reduce((sum, e) => sum + overlap(e, from, to), 0);
-}
+const pillsHtml = (tagIds) =>
+  (tagIds || []).map(tagById).filter(Boolean)
+    .map((t) => `<span class="pill" style="--c:${t.color}">${esc(t.name)}</span>`).join("");
 
 // ---------- timer ----------
-function startTimer() {
-  const task = $("task-input").value.trim() || "Untitled";
-  const category = $("category-input").value.trim();
-  running = { task, category, start: Date.now() };
-  save(RUNNING_KEY, running);
-  syncTimerUI();
+function startTimer(title, tagIds) {
+  if (state.running) stopTimer();
+  state.running = {
+    projectId: state.currentProjectId,
+    title: title.trim() || "Untitled",
+    tagIds: [...tagIds],
+    start: Date.now(),
+    pausedMs: 0,
+    pausedAt: null,
+  };
+  save();
   render();
 }
 
+function togglePause() {
+  const r = state.running;
+  if (!r) return;
+  if (r.pausedAt) { r.pausedMs += Date.now() - r.pausedAt; r.pausedAt = null; }
+  else r.pausedAt = Date.now();
+  save();
+  renderRunning();
+}
+
 function stopTimer() {
-  if (!running) return;
-  const end = Date.now();
-  if (end - running.start >= 1000) {
-    entries.push({ id: uid(), task: running.task, category: running.category, start: running.start, end });
-    persist();
+  const r = state.running;
+  if (!r) return;
+  const end = r.pausedAt || Date.now();
+  if (end - r.start - r.pausedMs >= 1000) {
+    state.entries.push({ id: uid(), projectId: r.projectId, title: r.title, tagIds: r.tagIds, start: r.start, end, pausedMs: r.pausedMs });
   }
-  running = null;
-  save(RUNNING_KEY, null);
-  $("task-input").value = "";
-  syncTimerUI();
+  state.running = null;
+  $("title-input").value = "";
+  save();
   render();
 }
 
 function tick() {
-  if (!running) return;
-  const elapsed = Date.now() - running.start;
-  $("timer-display").textContent = fmtClock(elapsed);
-  document.title = `⏱ ${fmtClock(elapsed)} · ${running.task}`;
+  const r = state.running;
+  if (!r) { document.title = "Time Tracker"; return; }
+  const txt = fmtClock(runningElapsed());
+  $("running-time").textContent = txt;
+  $("mini-time").textContent = txt;
+  document.title = `${r.pausedAt ? "❚❚" : "▶"} ${txt} · ${r.title}`;
 }
+setInterval(tick, 1000);
 
-function syncTimerUI() {
-  const btn = $("timer-btn");
-  const card = document.querySelector(".timer-card");
-  clearInterval(tickHandle);
-  if (running) {
-    btn.textContent = "Stop";
-    btn.className = "btn stop";
-    card.classList.add("running");
-    $("task-input").value = running.task;
-    $("category-input").value = running.category;
-    tick();
-    tickHandle = setInterval(() => {
-      tick();
-      // refresh stats every 30s while running
-      if (Math.floor((Date.now() - running.start) / 1000) % 30 === 0) render();
-    }, 1000);
-  } else {
-    btn.textContent = "Start";
-    btn.className = "btn start";
-    card.classList.remove("running");
-    $("timer-display").textContent = "00:00:00";
-    document.title = "Time Tracker";
-  }
-}
-
-// ---------- rendering ----------
-function renderStats() {
-  const now = Date.now();
-  const today = startOfDay(now);
-  const spans = allSpans();
-
-  $("stat-today").textContent = fmtShort(totalBetween(today, addDays(today, 1), spans));
-  $("stat-week").textContent = fmtShort(totalBetween(startOfWeek(now), addDays(startOfWeek(now), 7), spans));
-  $("stat-avg").textContent = fmtShort(totalBetween(addDays(today, -6), addDays(today, 1), spans) / 7);
-
-  // Streak: consecutive days with tracked time, ending today (or yesterday if today is empty).
-  let streak = 0;
-  let day = today;
-  if (totalBetween(day, addDays(day, 1), spans) === 0) day = addDays(day, -1);
-  while (totalBetween(day, addDays(day, 1), spans) > 0) {
-    streak++;
-    day = addDays(day, -1);
-  }
-  $("stat-streak").textContent = `${streak} day${streak === 1 ? "" : "s"}`;
-}
-
-function renderWeekChart() {
-  const today = startOfDay(Date.now());
-  const spans = allSpans();
-  const days = [];
-  for (let i = 6; i >= 0; i--) {
-    const d = addDays(today, -i);
-    days.push({ d, total: totalBetween(d, addDays(d, 1), spans) });
-  }
-  const max = Math.max(...days.map((x) => x.total), 3600000);
-  $("week-chart").innerHTML = days
-    .map(({ d, total }) => {
-      const label = new Date(d).toLocaleDateString(undefined, { weekday: "short" });
-      const pct = (total / max) * 100;
-      return `<div class="bar-col${d === today ? " today" : ""}" title="${fmtShort(total)}">
-        <span class="bar-val">${total ? fmtShort(total) : ""}</span>
-        <div class="bar" style="height:${pct}%"></div>
-        <span class="bar-label">${label}</span>
-      </div>`;
-    })
+// ---------- rendering: project bar ----------
+function renderProjectBar() {
+  const p = project();
+  $("project-dot").style.background = p.color;
+  $("project-name").textContent = p.name;
+  $("project-menu").innerHTML = state.projects
+    .map((x) => `<button data-pid="${x.id}" class="${x.id === p.id ? "current" : ""}"><span class="dot" style="background:${x.color}"></span>${esc(x.name)}</button>`)
     .join("");
 }
 
-function renderBreakdown() {
-  const from = startOfWeek(Date.now());
-  const to = addDays(from, 7);
-  const totals = new Map();
-  for (const e of allSpans()) {
-    const t = overlap(e, from, to);
-    if (!t) continue;
-    const key = e.category || "Uncategorized";
-    totals.set(key, (totals.get(key) || 0) + t);
-  }
-  const sorted = [...totals].sort((a, b) => b[1] - a[1]);
-  const sum = sorted.reduce((s, [, v]) => s + v, 0);
-  $("category-breakdown").innerHTML = sorted.length
-    ? sorted
-        .map(([cat, t]) => {
-          const color = colorFor(cat === "Uncategorized" ? "" : cat);
-          return `<li><span>${escapeHtml(cat)}</span><span>${fmtShort(t)} · ${Math.round((t / sum) * 100)}%</span>
-            <div class="track"><div class="fill" style="width:${(t / sum) * 100}%;background:${color}"></div></div></li>`;
-        })
-        .join("")
-    : `<li class="muted">Nothing tracked this week yet.</li>`;
+// ---------- rendering: timer tab ----------
+function renderTagPicker() {
+  const selected = new Set(state.draftTagIds);
+  $("tag-picker").innerHTML =
+    projectTags().map((t) => `
+      <span class="chip ${selected.has(t.id) ? "on" : ""}" style="--c:${t.color}">
+        <button type="button" class="chip-main" data-tag="${t.id}">${esc(t.name)}</button>
+        <button type="button" class="chip-edit" data-edit-tag="${t.id}" title="Edit tag">✎</button>
+      </span>`).join("") +
+    `<button type="button" id="new-tag" class="link-btn">+ New tag</button>`;
 }
 
-function renderHeatmap() {
-  const today = startOfDay(Date.now());
-  const start = addDays(startOfWeek(today), -11 * 7);
-  const spans = allSpans();
-  const cells = [];
-  for (let d = start; d < addDays(startOfWeek(today), 7); d = addDays(d, 1)) {
-    if (d > today) {
-      cells.push(`<div class="heat-cell future"></div>`);
-      continue;
-    }
-    const t = totalBetween(d, addDays(d, 1), spans);
-    const h = t / 3600000;
-    const level = t === 0 ? 0 : h < 1 ? 1 : h < 2 ? 2 : h < 4 ? 3 : 4;
-    const label = new Date(d).toLocaleDateString(undefined, { month: "short", day: "numeric" });
-    cells.push(`<div class="heat-cell" data-l="${level}" title="${label}: ${fmtShort(t)}"></div>`);
+function renderRunning() {
+  const r = state.running;
+  const showRunning = !!r && r.projectId === state.currentProjectId;
+  $("start-form").classList.toggle("hidden", showRunning);
+  $("running").classList.toggle("hidden", !showRunning);
+  $("entry-card").classList.toggle("is-running", showRunning);
+  if (r) {
+    $("running-title").textContent = r.title;
+    $("running-tags").innerHTML = pillsHtml(r.tagIds);
+    $("running-clock").classList.toggle("paused", !!r.pausedAt);
+    $("pause-btn").textContent = r.pausedAt ? "▶" : "❚❚";
+    $("pause-btn").title = r.pausedAt ? "Resume" : "Pause";
+    $("mini-title").textContent = r.title;
   }
-  $("heatmap").innerHTML = cells.join("");
+  // Mini timer: visible when running and the full timer isn't on screen.
+  $("mini-timer").classList.toggle("hidden", !r || (activeTab === "timer" && showRunning));
+  tick();
 }
 
 function renderHistory() {
-  const q = $("filter-input").value.trim().toLowerCase();
-  const list = entries
-    .filter((e) => !q || e.task.toLowerCase().includes(q) || (e.category || "").toLowerCase().includes(q))
-    .sort((a, b) => b.start - a.start);
-
+  const list = projectEntries().sort((a, b) => b.start - a.start);
   const groups = new Map();
   for (const e of list) {
-    const key = startOfDay(e.start);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(e);
+    const k = startOfDay(e.start);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(e);
   }
 
-  const today = startOfDay(Date.now());
   const html = [];
-  let shown = 0;
+  let n = 0;
   for (const [day, items] of groups) {
-    if (shown++ >= visibleDays) break;
-    const total = items.reduce((s, e) => s + (e.end - e.start), 0);
-    const label =
-      day === today
-        ? "Today"
-        : day === addDays(today, -1)
-        ? "Yesterday"
-        : new Date(day).toLocaleDateString(undefined, { weekday: "long", month: "short", day: "numeric", year: "numeric" });
-    html.push(`<div class="day-group"><div class="day-head"><span>${label}</span><span>${fmtShort(total)}</span></div>`);
+    if (n++ >= visibleDays) break;
+    const total = items.reduce((s, e) => s + activeMs(e), 0);
+    html.push(`<div class="day"><div class="day-head"><span>${fmtDate(day)}</span><span class="day-total">${fmtDur(total)}</span></div><div class="day-list">`);
     for (const e of items) {
-      const cat = e.category
-        ? `<span class="entry-cat" style="background:${colorFor(e.category)}">${escapeHtml(e.category)}</span>`
-        : "";
-      html.push(`<div class="entry" data-id="${e.id}">
-        <div class="entry-task">${escapeHtml(e.task)}${cat}</div>
-        <span class="entry-time">${fmtHM(e.start)} – ${fmtHM(e.end)}</span>
-        <span class="entry-dur">${fmtClock(e.end - e.start)}</span>
-        <div class="entry-actions">
-          <button class="icon-btn" data-act="resume" title="Continue this task">▶</button>
-          <button class="icon-btn" data-act="edit" title="Edit">✎</button>
-          <button class="icon-btn" data-act="delete" title="Delete">✕</button>
-        </div>
-      </div>`);
+      const paused = e.pausedMs >= 1000 ? `<span class="entry-paused">| Paused time: ${fmtDur(e.pausedMs)}</span>` : "";
+      html.push(`
+        <div class="entry" data-id="${e.id}">
+          <div class="entry-main">
+            <div class="entry-title">${esc(e.title)}</div>
+            <div class="entry-meta">
+              <span class="entry-dur">${fmtDur(activeMs(e))}</span>
+              <span class="entry-range">${fmtHM(e.start)} – ${fmtHM(e.end)}</span>${paused}
+              ${pillsHtml(e.tagIds)}
+            </div>
+          </div>
+          <div class="entry-actions">
+            <button class="icon-btn" data-act="continue" title="Continue">▶</button>
+            <button class="icon-btn" data-act="edit" title="Edit">✎</button>
+            <button class="icon-btn" data-act="delete" title="Delete">✕</button>
+          </div>
+        </div>`);
     }
-    html.push(`</div>`);
+    html.push(`</div></div>`);
   }
-  if (groups.size > visibleDays) html.push(`<button id="more-btn" class="btn ghost more">Show more (${groups.size - visibleDays} more days)</button>`);
+  if (groups.size > visibleDays) html.push(`<button id="more-btn" class="btn btn-ghost more-btn">Show older days</button>`);
   $("history").innerHTML = html.join("");
-  $("empty").style.display = entries.length ? "none" : "";
+  $("history-empty").classList.toggle("hidden", list.length > 0);
 }
 
-function renderCategories() {
-  const cats = [...new Set(entries.map((e) => e.category).filter(Boolean))].sort();
-  $("category-list").innerHTML = cats.map((c) => `<option value="${escapeHtml(c)}">`).join("");
+// ---------- rendering: statistics tab ----------
+function projectSpans() {
+  const spans = projectEntries().map((e) => ({ ...e, ms: activeMs(e) }));
+  const r = state.running;
+  if (r && r.projectId === state.currentProjectId) spans.push({ ...r, end: Date.now(), ms: runningElapsed(r) });
+  return spans;
+}
+
+function renderStats() {
+  const spans = projectSpans();
+  const total = spans.reduce((s, e) => s + e.ms, 0);
+  $("s-total").textContent = fmtDur(total);
+  $("s-sessions").textContent = spans.length;
+
+  const longest = spans.reduce((a, b) => (b.ms > (a?.ms || 0) ? b : a), null);
+  $("s-longest").textContent = longest ? fmtDur(longest.ms) : "—";
+  $("s-longest-sub").textContent = longest ? longest.title : "";
+
+  // Per-day totals (sessions are attributed to the day they started)
+  const perDay = new Map();
+  for (const e of spans) { const k = startOfDay(e.start); perDay.set(k, (perDay.get(k) || 0) + e.ms); }
+  let record = null;
+  for (const [day, ms] of perDay) if (!record || ms > record.ms) record = { day, ms };
+  $("s-record").textContent = record ? fmtDur(record.ms) : "—";
+  $("s-record-sub").textContent = record ? fmtShortDate(record.day) + ", " + new Date(record.day).getFullYear() : "";
+
+  // Last 30 days chart
+  const today = startOfDay(Date.now());
+  const days = [];
+  for (let i = 29; i >= 0; i--) { const d = addDays(today, -i); days.push({ d, ms: perDay.get(d) || 0 }); }
+  const max = Math.max(...days.map((x) => x.ms), 1);
+  $("chart").innerHTML = days
+    .map(({ d, ms }) => `<div class="chart-col" data-tip="${fmtShortDate(d)} — ${ms ? fmtDur(ms) : "nothing"}"><div class="chart-bar" style="height:${ms ? Math.max(2, (ms / max) * 100) : 0}%"></div></div>`)
+    .join("");
+  $("chart-from").textContent = fmtShortDate(days[0].d);
+
+  // Time per tag
+  const perTag = new Map();
+  for (const e of spans) for (const id of e.tagIds || []) perTag.set(id, (perTag.get(id) || 0) + e.ms);
+  const rows = projectTags().map((t) => ({ t, ms: perTag.get(t.id) || 0 })).sort((a, b) => b.ms - a.ms);
+  const tagMax = Math.max(...rows.map((r) => r.ms), 1);
+  $("tag-stats").innerHTML = rows.length
+    ? rows.map(({ t, ms }) => `
+        <span class="name" style="--c:${t.color}">${esc(t.name)}</span>
+        <div class="track"><div class="fill" style="--c:${t.color};width:${(ms / tagMax) * 100}%"></div></div>
+        <span class="val">${fmtDur(ms)}</span>`).join("")
+    : `<span class="muted">No tags in this project yet.</span>`;
 }
 
 function render() {
-  renderStats();
-  renderWeekChart();
-  renderBreakdown();
-  renderHeatmap();
-  renderHistory();
-  renderCategories();
+  renderProjectBar();
+  renderTagPicker();
+  renderRunning();
+  if (activeTab === "timer") renderHistory();
+  else renderStats();
 }
 
-// ---------- editing ----------
-let editingId = null;
+// ---------- modal ----------
+let modalHandlers = null;
 
-function openEdit(id) {
-  const e = entries.find((x) => x.id === id);
-  if (!e) return;
-  editingId = id;
-  $("edit-task").value = e.task;
-  $("edit-category").value = e.category || "";
-  $("edit-date").value = toDateInput(e.start);
-  $("edit-start").value = fmtHM(e.start);
-  $("edit-end").value = fmtHM(e.end);
-  $("edit-dialog").showModal();
+function openModal({ title, body, okText = "Save", onOk, onDelete, onOpen }) {
+  $("modal-title").textContent = title;
+  $("modal-body").innerHTML = body;
+  $("modal-ok").textContent = okText;
+  $("modal-delete").classList.toggle("hidden", !onDelete);
+  modalHandlers = { onOk, onDelete };
+  $("modal").showModal();
+  onOpen?.();
+  $("modal-body").querySelector("input")?.focus();
+}
+function closeModal() { $("modal").close(); modalHandlers = null; }
+
+$("modal-form").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  if (modalHandlers?.onOk?.() === false) return; // validation failed
+  closeModal();
+  save();
+  render();
+});
+$("modal-cancel").addEventListener("click", closeModal);
+$("modal-delete").addEventListener("click", () => {
+  if (modalHandlers?.onDelete?.() === false) return;
+  closeModal();
+  save();
+  render();
+});
+
+const swatchHtml = (current) =>
+  `<div class="swatches" id="m-swatches">${COLORS.map((c) => `<button type="button" class="swatch ${c === current ? "on" : ""}" data-color="${c}" style="background:${c}"></button>`).join("")}</div>`;
+function wireSwatches() {
+  $("m-swatches").addEventListener("click", (ev) => {
+    const b = ev.target.closest(".swatch");
+    if (!b) return;
+    $("m-swatches").querySelectorAll(".swatch").forEach((s) => s.classList.toggle("on", s === b));
+  });
+}
+const pickedColor = () => $("m-swatches").querySelector(".swatch.on")?.dataset.color || COLORS[0];
+
+function tagToggleHtml(selectedIds, pid) {
+  const sel = new Set(selectedIds);
+  return `<div class="tag-picker" id="m-tags">${projectTags(pid).map((t) => `
+      <span class="chip ${sel.has(t.id) ? "on" : ""}" style="--c:${t.color}"><button type="button" class="chip-main" data-tag="${t.id}" style="padding-right:10px">${esc(t.name)}</button></span>`).join("")}</div>`;
+}
+function wireTagToggles() {
+  $("m-tags").addEventListener("click", (ev) => {
+    const b = ev.target.closest("[data-tag]");
+    if (b) b.parentElement.classList.toggle("on");
+  });
+}
+const pickedTags = () => [...$("m-tags").querySelectorAll(".chip.on [data-tag]")].map((b) => b.dataset.tag);
+
+function editProject(p) {
+  openModal({
+    title: p ? "Edit project" : "New project",
+    okText: p ? "Save" : "Create",
+    body: `<label class="field">Name <input id="m-name" class="input" maxlength="60" required value="${esc(p?.name || "")}"></label>
+           <div class="field">Color ${swatchHtml(p?.color || COLORS[Math.floor(Math.random() * COLORS.length)])}</div>`,
+    onOpen: wireSwatches,
+    onOk: () => {
+      const name = $("m-name").value.trim();
+      if (!name) return false;
+      if (p) Object.assign(p, { name, color: pickedColor() });
+      else {
+        const np = { id: uid(), name, color: pickedColor() };
+        state.projects.push(np);
+        state.currentProjectId = np.id;
+        state.draftTagIds = [];
+      }
+    },
+    onDelete: p && state.projects.length > 1 ? () => {
+      if (!confirm(`Delete project "${p.name}" and all of its sessions and tags?`)) return false;
+      if (state.running?.projectId === p.id) state.running = null;
+      state.projects = state.projects.filter((x) => x.id !== p.id);
+      state.entries = state.entries.filter((e) => e.projectId !== p.id);
+      state.tags = state.tags.filter((t) => t.projectId !== p.id);
+      state.currentProjectId = state.projects[0].id;
+      state.draftTagIds = [];
+    } : null,
+  });
 }
 
-// Build a span from date + start/end times; an end before the start rolls over to the next day.
-function spanFromInputs(date, startTime, endTime) {
-  const start = fromInputs(date, startTime);
-  let end = fromInputs(date, endTime);
-  if (end <= start) end = addDays(end, 1);
-  return { start, end };
+function editTag(t) {
+  openModal({
+    title: t ? "Edit tag" : "New tag",
+    okText: t ? "Save" : "Create",
+    body: `<label class="field">Name <input id="m-name" class="input" maxlength="40" required value="${esc(t?.name || "")}"></label>
+           <div class="field">Color ${swatchHtml(t?.color || COLORS[Math.floor(Math.random() * COLORS.length)])}</div>`,
+    onOpen: wireSwatches,
+    onOk: () => {
+      const name = $("m-name").value.trim();
+      if (!name) return false;
+      if (t) Object.assign(t, { name, color: pickedColor() });
+      else state.tags.push({ id: uid(), projectId: state.currentProjectId, name, color: pickedColor() });
+    },
+    onDelete: t ? () => {
+      if (!confirm(`Delete tag "${t.name}"? It will be removed from all sessions.`)) return false;
+      state.tags = state.tags.filter((x) => x.id !== t.id);
+      const strip = (o) => { if (o?.tagIds) o.tagIds = o.tagIds.filter((id) => id !== t.id); };
+      state.entries.forEach(strip);
+      strip(state.running);
+      state.draftTagIds = state.draftTagIds.filter((id) => id !== t.id);
+    } : null,
+  });
 }
 
-// ---------- export ----------
+// Edit an existing entry, or create one manually when `e` is null.
+function editEntry(e) {
+  const start = e?.start ?? Date.now() - 3600000;
+  const end = e?.end ?? Date.now();
+  openModal({
+    title: e ? "Edit session" : "Add session",
+    okText: e ? "Save" : "Add",
+    body: `<label class="field">Title <input id="m-title" class="input" maxlength="120" value="${esc(e?.title || "")}"></label>
+           <div class="field">Tags ${tagToggleHtml(e?.tagIds || [], e?.projectId || state.currentProjectId)}</div>
+           <label class="field">Date <input id="m-date" class="input" type="date" required value="${toDateInput(start)}"></label>
+           <div class="row2">
+             <label class="field">Start <input id="m-start" class="input" type="time" required value="${fmtHM(start)}"></label>
+             <label class="field">End <input id="m-end" class="input" type="time" required value="${fmtHM(end)}"></label>
+           </div>
+           <label class="field">Paused (minutes) <input id="m-paused" class="input" type="number" min="0" step="1" value="${Math.round((e?.pausedMs || 0) / 60000)}"></label>`,
+    onOpen: wireTagToggles,
+    onOk: () => {
+      const s = fromInputs($("m-date").value, $("m-start").value);
+      let en = fromInputs($("m-date").value, $("m-end").value);
+      if (en <= s) en = addDays(en, 1); // crosses midnight
+      const pausedMs = Math.min(Math.max(0, Number($("m-paused").value) || 0) * 60000, en - s);
+      const data = { title: $("m-title").value.trim() || "Untitled", tagIds: pickedTags(), start: s, end: en, pausedMs };
+      if (e) Object.assign(e, data);
+      else state.entries.push({ id: uid(), projectId: state.currentProjectId, ...data });
+    },
+    onDelete: e ? () => { state.entries = state.entries.filter((x) => x.id !== e.id); } : null,
+  });
+}
+
+function editRunning() {
+  const r = state.running;
+  if (!r) return;
+  openModal({
+    title: "Edit running session",
+    body: `<label class="field">Title <input id="m-title" class="input" maxlength="120" value="${esc(r.title)}"></label>
+           <div class="field">Tags ${tagToggleHtml(r.tagIds, r.projectId)}</div>
+           <label class="field">Started at <input id="m-start" class="input" type="time" value="${fmtHM(r.start)}"></label>`,
+    onOpen: wireTagToggles,
+    onOk: () => {
+      r.title = $("m-title").value.trim() || "Untitled";
+      r.tagIds = pickedTags();
+      let s = fromInputs(toDateInput(r.start), $("m-start").value);
+      if (s > Date.now()) s = addDays(s, -1);
+      r.start = s;
+    },
+  });
+}
+
+// ---------- CSV ----------
 function exportCsv() {
-  const rows = [["task", "category", "start", "end", "duration_minutes"]];
-  for (const e of [...entries].sort((a, b) => a.start - b.start)) {
-    rows.push([e.task, e.category || "", new Date(e.start).toISOString(), new Date(e.end).toISOString(), Math.round((e.end - e.start) / 60000)]);
+  const p = project();
+  const rows = [["title", "tags", "start", "end", "active_minutes", "paused_minutes"]];
+  for (const e of projectEntries().sort((a, b) => a.start - b.start)) {
+    rows.push([e.title, (e.tagIds || []).map((id) => tagById(id)?.name).filter(Boolean).join("; "),
+      new Date(e.start).toISOString(), new Date(e.end).toISOString(),
+      Math.round(activeMs(e) / 60000), Math.round((e.pausedMs || 0) / 60000)]);
   }
   const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
-  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
   const a = document.createElement("a");
-  a.href = url;
-  a.download = `time-tracker-${toDateInput(Date.now())}.csv`;
+  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  a.download = `${p.name.replace(/\W+/g, "-").toLowerCase()}-${toDateInput(Date.now())}.csv`;
   a.click();
-  URL.revokeObjectURL(url);
+  URL.revokeObjectURL(a.href);
 }
 
 // ---------- events ----------
-$("timer-form").addEventListener("submit", (ev) => {
-  ev.preventDefault();
-  running ? stopTimer() : startTimer();
+document.querySelectorAll(".tab").forEach((b) =>
+  b.addEventListener("click", () => switchTab(b.dataset.tab)));
+
+function switchTab(tab) {
+  activeTab = tab;
+  document.querySelectorAll(".tab").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+  $("tab-timer").classList.toggle("hidden", tab !== "timer");
+  $("tab-stats").classList.toggle("hidden", tab !== "stats");
+  render();
+}
+
+$("project-select").addEventListener("click", (ev) => {
+  ev.stopPropagation();
+  $("project-menu").classList.toggle("hidden");
+});
+$("project-menu").addEventListener("click", (ev) => {
+  const b = ev.target.closest("[data-pid]");
+  if (!b) return;
+  state.currentProjectId = b.dataset.pid;
+  state.draftTagIds = [];
+  visibleDays = 14;
+  $("project-menu").classList.add("hidden");
+  save();
+  render();
+});
+document.addEventListener("click", () => $("project-menu").classList.add("hidden"));
+$("project-edit").addEventListener("click", () => editProject(project()));
+$("project-new").addEventListener("click", () => editProject(null));
+
+$("tag-picker").addEventListener("click", (ev) => {
+  const edit = ev.target.closest("[data-edit-tag]");
+  if (edit) return editTag(tagById(edit.dataset.editTag));
+  if (ev.target.id === "new-tag") return editTag(null);
+  const b = ev.target.closest("[data-tag]");
+  if (!b) return;
+  const id = b.dataset.tag;
+  state.draftTagIds = state.draftTagIds.includes(id) ? state.draftTagIds.filter((x) => x !== id) : [...state.draftTagIds, id];
+  save();
+  renderTagPicker();
 });
 
-$("manual-form").addEventListener("submit", (ev) => {
+$("start-form").addEventListener("submit", (ev) => {
   ev.preventDefault();
-  const { start, end } = spanFromInputs($("manual-date").value, $("manual-start").value, $("manual-end").value);
-  entries.push({ id: uid(), task: $("manual-task").value.trim(), category: $("manual-category").value.trim(), start, end });
-  persist();
-  $("manual-task").value = "";
-  render();
+  startTimer($("title-input").value, state.draftTagIds);
+});
+$("pause-btn").addEventListener("click", togglePause);
+$("stop-btn").addEventListener("click", stopTimer);
+$("running-edit").addEventListener("click", editRunning);
+$("manual-btn").addEventListener("click", () => editEntry(null));
+$("export-btn").addEventListener("click", exportCsv);
+
+$("mini-timer").addEventListener("click", () => {
+  if (state.running) { state.currentProjectId = state.running.projectId; save(); }
+  switchTab("timer");
 });
 
 $("history").addEventListener("click", (ev) => {
-  if (ev.target.id === "more-btn") {
-    visibleDays += 14;
-    renderHistory();
-    return;
-  }
-  const btn = ev.target.closest("button[data-act]");
-  if (!btn) return;
-  const id = btn.closest(".entry").dataset.id;
-  const e = entries.find((x) => x.id === id);
+  if (ev.target.id === "more-btn") { visibleDays += 14; renderHistory(); return; }
+  const b = ev.target.closest("[data-act]");
+  if (!b) return;
+  const e = state.entries.find((x) => x.id === b.closest(".entry").dataset.id);
   if (!e) return;
-  if (btn.dataset.act === "delete") {
-    if (confirm(`Delete "${e.task}"?`)) {
-      entries = entries.filter((x) => x.id !== id);
-      persist();
-      render();
-    }
-  } else if (btn.dataset.act === "edit") {
-    openEdit(id);
-  } else if (btn.dataset.act === "resume") {
-    if (running) stopTimer();
-    $("task-input").value = e.task;
-    $("category-input").value = e.category || "";
-    startTimer();
+  if (b.dataset.act === "continue") startTimer(e.title, e.tagIds || []);
+  else if (b.dataset.act === "edit") editEntry(e);
+  else if (b.dataset.act === "delete" && confirm(`Delete "${e.title}"?`)) {
+    state.entries = state.entries.filter((x) => x.id !== e.id);
+    save();
+    render();
   }
 });
 
-$("edit-form").addEventListener("submit", () => {
-  const e = entries.find((x) => x.id === editingId);
-  if (!e) return;
-  const { start, end } = spanFromInputs($("edit-date").value, $("edit-start").value, $("edit-end").value);
-  Object.assign(e, { task: $("edit-task").value.trim(), category: $("edit-category").value.trim(), start, end });
-  persist();
-  render();
+// Chart hover tooltip
+$("chart").addEventListener("mousemove", (ev) => {
+  const col = ev.target.closest(".chart-col");
+  const tip = $("chart-tip");
+  if (!col) return tip.classList.add("hidden");
+  tip.textContent = col.dataset.tip;
+  tip.style.left = `${col.offsetLeft + col.offsetWidth / 2}px`;
+  tip.classList.remove("hidden");
 });
-$("edit-cancel").addEventListener("click", () => $("edit-dialog").close());
+$("chart").addEventListener("mouseleave", () => $("chart-tip").classList.add("hidden"));
 
-$("filter-input").addEventListener("input", renderHistory);
-$("export-btn").addEventListener("click", exportCsv);
-
-// Keep tabs in sync if the tracker is open in more than one window.
+// Keep several open tabs in sync.
 window.addEventListener("storage", (ev) => {
-  if (ev.key === STORAGE_KEY) entries = load(STORAGE_KEY, []);
-  if (ev.key === RUNNING_KEY) {
-    running = load(RUNNING_KEY, null);
-    syncTimerUI();
-  }
+  if (ev.key !== STORE_KEY) return;
+  state = loadState();
   render();
 });
 
-// ---------- init ----------
-$("manual-date").value = toDateInput(Date.now());
-syncTimerUI();
+// Refresh statistics every 30 s while the timer runs.
+setInterval(() => { if (state.running && activeTab === "stats") renderStats(); }, 30000);
+
+save(); // persist the default project/tags on first visit so their ids stay stable
 render();
