@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Time Tracker</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="wrap">
+      <header class="top">
+        <h1>⏱ Time Tracker</h1>
+        <div class="top-actions">
+          <button id="export-btn" class="btn ghost" title="Download all entries as CSV">Export CSV</button>
+        </div>
+      </header>
+
+      <!-- Timer -->
+      <section class="card timer-card">
+        <form id="timer-form" class="timer-row" autocomplete="off">
+          <input id="task-input" class="input grow" placeholder="What are you working on?" maxlength="120" />
+          <input id="category-input" class="input cat" placeholder="Category" list="category-list" maxlength="40" />
+          <datalist id="category-list"></datalist>
+          <span id="timer-display" class="timer-display">00:00:00</span>
+          <button id="timer-btn" type="submit" class="btn start">Start</button>
+        </form>
+        <details class="manual">
+          <summary>Add time manually</summary>
+          <form id="manual-form" class="manual-row" autocomplete="off">
+            <input id="manual-task" class="input grow" placeholder="Task" maxlength="120" required />
+            <input id="manual-category" class="input cat" placeholder="Category" list="category-list" maxlength="40" />
+            <input id="manual-date" class="input" type="date" required />
+            <input id="manual-start" class="input" type="time" required />
+            <input id="manual-end" class="input" type="time" required />
+            <button type="submit" class="btn">Add</button>
+          </form>
+        </details>
+      </section>
+
+      <!-- Stats -->
+      <section class="stats">
+        <div class="card stat"><span class="stat-label">Today</span><span id="stat-today" class="stat-value">0h 0m</span></div>
+        <div class="card stat"><span class="stat-label">This week</span><span id="stat-week" class="stat-value">0h 0m</span></div>
+        <div class="card stat"><span class="stat-label">Daily avg (7d)</span><span id="stat-avg" class="stat-value">0h 0m</span></div>
+        <div class="card stat"><span class="stat-label">Streak</span><span id="stat-streak" class="stat-value">0 days</span></div>
+      </section>
+
+      <section class="grid2">
+        <div class="card">
+          <h2>Last 7 days</h2>
+          <div id="week-chart" class="week-chart"></div>
+        </div>
+        <div class="card">
+          <h2>By category (this week)</h2>
+          <ul id="category-breakdown" class="breakdown"></ul>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Activity (last 12 weeks)</h2>
+        <div id="heatmap" class="heatmap"></div>
+      </section>
+
+      <!-- History -->
+      <section class="card">
+        <div class="history-head">
+          <h2>History</h2>
+          <input id="filter-input" class="input small" placeholder="Filter…" />
+        </div>
+        <div id="history"></div>
+        <p id="empty" class="muted">No entries yet. Start the timer to track your first session.</p>
+      </section>
+    </main>
+
+    <dialog id="edit-dialog">
+      <form id="edit-form" method="dialog">
+        <h3>Edit entry</h3>
+        <label>Task <input id="edit-task" class="input" maxlength="120" required /></label>
+        <label>Category <input id="edit-category" class="input" list="category-list" maxlength="40" /></label>
+        <label>Date <input id="edit-date" class="input" type="date" required /></label>
+        <div class="row2">
+          <label>Start <input id="edit-start" class="input" type="time" required /></label>
+          <label>End <input id="edit-end" class="input" type="time" required /></label>
+        </div>
+        <div class="dialog-actions">
+          <button type="button" id="edit-cancel" class="btn ghost">Cancel</button>
+          <button type="submit" class="btn">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="index.js"></script>
+  </body>
+</html>
