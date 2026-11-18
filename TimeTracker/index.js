@@ -5,11 +5,15 @@ const STORE_KEY = "timetracker.v2";
 const DAY_MS = 86400000;
 const COLORS = ["#e53935", "#ff7a1a", "#ffd60a", "#2bd52b", "#1ec8a0", "#1ea7ff", "#5b6cff", "#a35bff", "#ff5bd1", "#ff5577", "#9e9e9e"];
 
+// Tags come in two kinds: "activity" tags (what you're doing) are listed first and
+// lead the auto-filled task name; "content" tags (what you're doing it with) follow.
 const DEFAULT_TAGS = [
-  ["Anime", "#ff5577"], ["Audiobook", "#ff7a1a"], ["Book", "#ffd60a"], ["Listening", "#1ea7ff"],
-  ["Manga", "#a35bff"], ["Mining", "#e53935"], ["OCR Mining", "#ff5bd1"], ["Reading", "#2bd52b"],
-  ["Watching", "#5b6cff"], ["YouTube", "#e53935"],
+  ["Watching", "#5b6cff", "activity"], ["Listening", "#1ea7ff", "activity"], ["Reading", "#2bd52b", "activity"],
+  ["Mining", "#e53935", "activity"], ["OCR Mining", "#ff5bd1", "activity"],
+  ["YouTube", "#e53935", "content"], ["Anime", "#ff5577", "content"], ["Podcast", "#1ec8a0", "content"],
+  ["Audiobook", "#ff7a1a", "content"], ["Book", "#ffd60a", "content"], ["Manga", "#a35bff", "content"],
 ];
+const ACTIVITY_NAMES = new Set(DEFAULT_TAGS.filter((t) => t[2] === "activity").map((t) => t[0].toLowerCase()));
 
 // ---------- state ----------
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
@@ -18,7 +22,7 @@ function freshState() {
   const projectId = uid();
   return {
     projects: [{ id: projectId, name: "Learning Japanese", color: "#e53935" }],
-    tags: DEFAULT_TAGS.map(([name, color]) => ({ id: uid(), projectId, name, color })),
+    tags: DEFAULT_TAGS.map(([name, color, kind]) => ({ id: uid(), projectId, name, color, kind })),
     entries: [], // {id, projectId, title, tagIds, start, end, pausedMs}
     running: null, // {projectId, title, tagIds, start, pausedMs, pausedAt}
     currentProjectId: projectId,
@@ -29,7 +33,11 @@ function freshState() {
 function loadState() {
   try {
     const s = JSON.parse(localStorage.getItem(STORE_KEY));
-    if (s && Array.isArray(s.projects) && s.projects.length) return s;
+    if (s && Array.isArray(s.projects) && s.projects.length) {
+      // Older saves have no tag kinds: treat the known activity words as activities.
+      for (const t of s.tags) if (!t.kind) t.kind = ACTIVITY_NAMES.has(t.name.toLowerCase()) ? "activity" : "content";
+      return s;
+    }
   } catch { /* fall through */ }
   return freshState();
 }
@@ -48,7 +56,10 @@ const pad = (n) => String(n).padStart(2, "0");
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
 const project = () => state.projects.find((p) => p.id === state.currentProjectId) || state.projects[0];
-const projectTags = (pid = state.currentProjectId) => state.tags.filter((t) => t.projectId === pid);
+const isActivity = (t) => t.kind === "activity";
+// Activities first, then content; otherwise keep the order the tags were created in.
+const byKind = (a, b) => isActivity(b) - isActivity(a);
+const projectTags = (pid = state.currentProjectId) => state.tags.filter((t) => t.projectId === pid).sort(byKind);
 const tagById = (id) => state.tags.find((t) => t.id === id);
 const projectEntries = (pid = state.currentProjectId) => state.entries.filter((e) => e.projectId === pid);
 
@@ -87,8 +98,32 @@ function fromInputs(date, time) {
 }
 
 const pillsHtml = (tagIds) =>
-  (tagIds || []).map(tagById).filter(Boolean)
+  (tagIds || []).map(tagById).filter(Boolean).sort(byKind)
     .map((t) => `<span class="pill" style="--c:${t.color}">${esc(t.name)}</span>`).join("");
+
+// ---------- auto-filled task names ----------
+// "Watching" + "YouTube" -> "Watching YouTube"; "Listening" + "Audiobook" -> "Listening to Audiobook";
+// "Watching" + "Mining" + "Anime" -> "Watching & Mining Anime".
+const joinNames = (names) =>
+  names.length <= 1 ? names.join("") : names.slice(0, -1).join(", ") + " & " + names[names.length - 1];
+
+function autoTitle(tagIds) {
+  const tags = tagIds.map(tagById).filter(Boolean);
+  const acts = tags.filter(isActivity).map((t) => t.name);
+  const things = tags.filter((t) => !isActivity(t)).map((t) => t.name);
+  if (!acts.length) return joinNames(things);
+  if (!things.length) return joinNames(acts);
+  const lastAct = acts[acts.length - 1].toLowerCase();
+  const joiner = lastAct === "listening" ? " to " : " ";
+  return joinNames(acts) + joiner + joinNames(things);
+}
+
+// Fill a title box from the chosen tags, but only if it is empty or still holds
+// the previous automatic name, so text you typed yourself is never overwritten.
+function applyAutoTitle(input, prevTagIds, nextTagIds) {
+  const current = input.value.trim();
+  if (current === "" || current === autoTitle(prevTagIds)) input.value = autoTitle(nextTagIds);
+}
 
 // ---------- timer ----------
 function startTimer(title, tagIds) {
@@ -150,8 +185,10 @@ function renderProjectBar() {
 // ---------- rendering: timer tab ----------
 function renderTagPicker() {
   const selected = new Set(state.draftTagIds);
+  const tags = projectTags();
+  const firstContent = tags.findIndex((t) => !isActivity(t));
   $("tag-picker").innerHTML =
-    projectTags().map((t) => `
+    tags.map((t, i) => (i === firstContent && i > 0 ? `<span class="tag-break"></span>` : "") + `
       <span class="chip ${selected.has(t.id) ? "on" : ""}" style="--c:${t.color}">
         <button type="button" class="chip-main" data-tag="${t.id}">${esc(t.name)}</button>
         <button type="button" class="chip-edit" data-edit-tag="${t.id}" title="Edit tag">✎</button>
@@ -325,7 +362,10 @@ function tagToggleHtml(selectedIds, pid) {
 function wireTagToggles() {
   $("m-tags").addEventListener("click", (ev) => {
     const b = ev.target.closest("[data-tag]");
-    if (b) b.parentElement.classList.toggle("on");
+    if (!b) return;
+    const prev = pickedTags();
+    b.parentElement.classList.toggle("on");
+    if ($("m-title")) applyAutoTitle($("m-title"), prev, pickedTags());
   });
 }
 const pickedTags = () => [...$("m-tags").querySelectorAll(".chip.on [data-tag]")].map((b) => b.dataset.tag);
@@ -365,13 +405,20 @@ function editTag(t) {
     title: t ? "Edit tag" : "New tag",
     okText: t ? "Save" : "Create",
     body: `<label class="field">Name <input id="m-name" class="input" maxlength="40" required value="${esc(t?.name || "")}"></label>
+           <div class="field">Type
+             <div class="kind-toggle" id="m-kind">
+               <label><input type="radio" name="kind" value="activity" ${t?.kind === "activity" ? "checked" : ""}> Activity <span class="muted">(Watching, Listening…) — listed first</span></label>
+               <label><input type="radio" name="kind" value="content" ${t?.kind === "activity" ? "" : "checked"}> Content <span class="muted">(YouTube, Audiobook…)</span></label>
+             </div>
+           </div>
            <div class="field">Color ${swatchHtml(t?.color || COLORS[Math.floor(Math.random() * COLORS.length)])}</div>`,
     onOpen: wireSwatches,
     onOk: () => {
       const name = $("m-name").value.trim();
       if (!name) return false;
-      if (t) Object.assign(t, { name, color: pickedColor() });
-      else state.tags.push({ id: uid(), projectId: state.currentProjectId, name, color: pickedColor() });
+      const kind = $("m-kind").querySelector("input:checked").value;
+      if (t) Object.assign(t, { name, kind, color: pickedColor() });
+      else state.tags.push({ id: uid(), projectId: state.currentProjectId, name, kind, color: pickedColor() });
     },
     onDelete: t ? () => {
       if (!confirm(`Delete tag "${t.name}"? It will be removed from all sessions.`)) return false;
@@ -488,7 +535,9 @@ $("tag-picker").addEventListener("click", (ev) => {
   const b = ev.target.closest("[data-tag]");
   if (!b) return;
   const id = b.dataset.tag;
-  state.draftTagIds = state.draftTagIds.includes(id) ? state.draftTagIds.filter((x) => x !== id) : [...state.draftTagIds, id];
+  const prev = state.draftTagIds;
+  state.draftTagIds = prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id];
+  applyAutoTitle($("title-input"), prev, state.draftTagIds);
   save();
   renderTagPicker();
 });
