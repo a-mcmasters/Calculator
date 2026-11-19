@@ -81,6 +81,26 @@
         </section>
 
         <section class="card">
+          <div class="heat-head">
+            <h2>Activity</h2>
+            <select id="heat-range" class="select" aria-label="Year"></select>
+          </div>
+          <p id="heat-summary" class="heat-summary"></p>
+          <div class="heat-wrap" id="heat-wrap">
+            <div class="heat-col heat-days"><span class="heat-month"></span><b>Mon</b><b></b><b>Wed</b><b></b><b>Fri</b><b></b><b></b></div>
+            <div id="heat-scroll" class="heat-scroll">
+              <div id="heatmap" class="heatmap"></div>
+            </div>
+            <div id="heat-tip" class="chart-tip hidden"></div>
+          </div>
+          <div class="heat-legend">
+            <span>Less</span>
+            <i data-l="0"></i><i data-l="1"></i><i data-l="2"></i><i data-l="3"></i><i data-l="4"></i>
+            <span>More</span>
+          </div>
+        </section>
+
+        <section class="card">
           <h2>Time per tag</h2>
           <div id="tag-stats" class="tag-stats"></div>
         </section>

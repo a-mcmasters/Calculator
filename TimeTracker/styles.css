@@ -190,3 +190,30 @@ dialog h3 { margin: 0 0 14px; font-size: 1.05rem; }
 .kind-toggle { display: flex; flex-direction: column; gap: 6px; color: var(--text); font-size: .85rem; }
 .kind-toggle label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
 .kind-toggle input { accent-color: var(--green); }
+
+/* ---------- activity heatmap ---------- */
+.heat-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.heat-head h2 { margin: 0; }
+.select { background: var(--card-2); color: var(--text); border: 1px solid #444; border-radius: 4px; padding: 4px 8px; font-size: .8rem; color-scheme: dark; }
+.heat-summary { margin: 6px 0 12px; font-size: .8rem; color: var(--muted); }
+.heat-summary b { color: var(--text); font-weight: 600; }
+.heat-wrap { position: relative; display: flex; gap: 2px; }
+.heat-scroll { overflow-x: auto; padding-bottom: 4px; scrollbar-width: thin; min-width: 0; flex: 1; }
+.heatmap { display: flex; gap: 2px; width: max-content; margin: 0 auto; }
+.heat-col { display: grid; grid-template-rows: 14px repeat(7, 10px); gap: 2px; }
+.heat-col i { width: 10px; height: 10px; border-radius: 2px; background: #2e2e2e; display: block; cursor: default; }
+.heat-col i.out { background: transparent; }
+.heat-col i.today { outline: 1px solid #aaa; outline-offset: -1px; }
+.heat-col i:hover { outline: 1px solid #ddd; outline-offset: -1px; }
+.heat-month { font-size: .65rem; color: var(--muted); white-space: nowrap; width: 10px; overflow: visible; line-height: 14px; }
+/* weekday labels sit outside the scrolling weeks */
+.heat-days { flex: none; }
+.heat-days b { font-size: .6rem; color: var(--muted); font-weight: 400; line-height: 10px; width: 22px; }
+[data-l="1"] { background: #0e4429 !important; }
+[data-l="2"] { background: #006d32 !important; }
+[data-l="3"] { background: #26a641 !important; }
+[data-l="4"] { background: #39d353 !important; }
+.heat-legend { display: flex; align-items: center; justify-content: flex-end; gap: 3px; margin-top: 8px; font-size: .7rem; color: var(--muted); }
+.heat-legend i { width: 11px; height: 11px; border-radius: 2px; background: #2e2e2e; display: inline-block; }
+.heat-legend span { margin: 0 4px; }
+#heat-tip { transform: translate(-50%, -100%); }

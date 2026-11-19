@@ -282,6 +282,8 @@ function renderStats() {
   $("s-record").textContent = record ? fmtDur(record.ms) : "—";
   $("s-record-sub").textContent = record ? fmtShortDate(record.day) + ", " + new Date(record.day).getFullYear() : "";
 
+  renderHeatmap(perDay);
+
   // Last 30 days chart
   const today = startOfDay(Date.now());
   const days = [];
@@ -303,6 +305,68 @@ function renderStats() {
         <div class="track"><div class="fill" style="--c:${t.color};width:${(ms / tagMax) * 100}%"></div></div>
         <span class="val">${fmtDur(ms)}</span>`).join("")
     : `<span class="muted">No tags in this project yet.</span>`;
+}
+
+// ---------- activity heatmap (GitHub-style calendar) ----------
+// Colour levels by time tracked that day.
+const HEAT_LEVELS = [30 * 60000, 60 * 60000, 2 * 3600000]; // <30 min, <1 h, <2 h, 2 h+
+const heatLevel = (ms) => (!ms ? 0 : ms < HEAT_LEVELS[0] ? 1 : ms < HEAT_LEVELS[1] ? 2 : ms < HEAT_LEVELS[2] ? 3 : 4);
+const mondayOf = (t) => addDays(startOfDay(t), -((new Date(t).getDay() + 6) % 7)); // weeks start on Monday
+let heatRange = "last"; // "last" = past 12 months, or a year like "2026"
+
+function renderHeatRange(perDay) {
+  const years = new Set([new Date().getFullYear()]);
+  for (const d of perDay.keys()) years.add(new Date(d).getFullYear());
+  const opts = [["last", "Last 12 months"], ...[...years].sort((a, b) => b - a).map((y) => [String(y), String(y)])];
+  if (!opts.some(([v]) => v === heatRange)) heatRange = "last";
+  $("heat-range").innerHTML = opts.map(([v, l]) => `<option value="${v}" ${v === heatRange ? "selected" : ""}>${l}</option>`).join("");
+}
+
+function renderHeatmap(perDay) {
+  renderHeatRange(perDay);
+  const today = startOfDay(Date.now());
+  let from, to; // inclusive day range shown
+  if (heatRange === "last") { to = today; from = addDays(addDays(today, 1), -365); }
+  else { const y = Number(heatRange); from = new Date(y, 0, 1).getTime(); to = Math.min(new Date(y, 11, 31).getTime(), today); }
+
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const cols = [];
+  let lastMonth = -1;
+  for (let week = mondayOf(from); week <= to; week = addDays(week, 7)) {
+    const cells = [];
+    let label = "";
+    for (let i = 0; i < 7; i++) {
+      const d = addDays(week, i);
+      if (d < from || d > to) { cells.push(`<i class="out"></i>`); continue; }
+      const date = new Date(d);
+      if (date.getDate() <= 7 && date.getMonth() !== lastMonth && !label) { label = months[date.getMonth()]; lastMonth = date.getMonth(); }
+      const ms = perDay.get(d) || 0;
+      const when = date.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" });
+      cells.push(`<i data-l="${heatLevel(ms)}" data-tip="${ms ? fmtDur(ms) : "No time"} on ${when}"${d === today ? ' class="today"' : ""}></i>`);
+    }
+    cols.push(`<div class="heat-col"><span class="heat-month">${label}</span>${cells.join("")}</div>`);
+  }
+  $("heatmap").innerHTML = cols.join("");
+
+  // Summary: total, active days, current and longest streak within the range
+  let total = 0, active = 0, longest = 0, run = 0;
+  for (let d = from; d <= to; d = addDays(d, 1)) {
+    const ms = perDay.get(d) || 0;
+    total += ms;
+    if (ms) { active++; run++; longest = Math.max(longest, run); } else run = 0;
+  }
+  let current = 0;
+  for (let d = perDay.get(today) ? today : addDays(today, -1); perDay.get(d); d = addDays(d, -1)) current++;
+  const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+  const label = heatRange === "last" ? "in the last 12 months" : `in ${heatRange}`;
+  $("heat-summary").innerHTML =
+    `<b>${fmtDur(total)}</b> ${label} · ${plural(active, "active day")} · ` +
+    (heatRange === "last" ? `current streak <b>${plural(current, "day")}</b> · ` : "") +
+    `longest streak <b>${plural(longest, "day")}</b>`;
+
+  // Show the most recent weeks first on narrow screens
+  const sc = $("heat-scroll");
+  sc.scrollLeft = sc.scrollWidth;
 }
 
 function render() {
@@ -582,6 +646,25 @@ $("chart").addEventListener("mousemove", (ev) => {
   tip.classList.remove("hidden");
 });
 $("chart").addEventListener("mouseleave", () => $("chart-tip").classList.add("hidden"));
+
+// Heatmap tooltip: hover on desktop, tap on phones
+function showHeatTip(ev) {
+  const cell = ev.target.closest("i[data-tip]");
+  const tip = $("heat-tip");
+  if (!cell) return tip.classList.add("hidden");
+  const wrap = $("heat-wrap").getBoundingClientRect();
+  const r = cell.getBoundingClientRect();
+  tip.textContent = cell.dataset.tip;
+  const x = Math.min(Math.max(r.left - wrap.left + r.width / 2, 70), wrap.width - 70);
+  tip.style.left = `${x}px`;
+  tip.style.top = `${r.top - wrap.top - 4}px`;
+  tip.classList.remove("hidden");
+}
+$("heatmap").addEventListener("mousemove", showHeatTip);
+$("heatmap").addEventListener("click", showHeatTip);
+$("heatmap").addEventListener("mouseleave", () => $("heat-tip").classList.add("hidden"));
+$("heat-scroll").addEventListener("scroll", () => $("heat-tip").classList.add("hidden"));
+$("heat-range").addEventListener("change", (ev) => { heatRange = ev.target.value; renderStats(); });
 
 // Keep several open tabs in sync.
 window.addEventListener("storage", (ev) => {
