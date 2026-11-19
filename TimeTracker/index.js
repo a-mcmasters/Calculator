@@ -176,6 +176,7 @@ setInterval(tick, 1000);
 function renderProjectBar() {
   const p = project();
   $("project-dot").style.background = p.color;
+  document.documentElement.style.setProperty("--accent", p.color); // theme stats in the project's colour
   $("project-name").textContent = p.name;
   $("project-menu").innerHTML = state.projects
     .map((x) => `<button data-pid="${x.id}" class="${x.id === p.id ? "current" : ""}"><span class="dot" style="background:${x.color}"></span>${esc(x.name)}</button>`)
